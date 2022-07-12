@@ -46,7 +46,7 @@ impl<'a, T> From<&[u8]> for EncodedKey<T> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Command {
     pub executable: u8,
     pub args: Vec<String>,
@@ -60,7 +60,9 @@ trait KeyOrm<'a>: Sized {
     fn encode_key(
         key: &Self::KeyTypeRef,
     ) -> std::result::Result<EncodedKey<Self>, Box<dyn std::error::Error>>;
-    fn decode_key(data: &EncodedKey<Self>) -> std::result::Result<Self::KeyType, Box<dyn std::error::Error>>;
+    fn decode_key(
+        data: &EncodedKey<Self>,
+    ) -> std::result::Result<Self::KeyType, Box<dyn std::error::Error>>;
     fn key(&self) -> std::result::Result<EncodedKey<Self>, Box<dyn std::error::Error>>;
 }
 
@@ -76,7 +78,9 @@ impl<'a> KeyOrm<'a> for Command {
             .map_err(|e| e.into())
     }
 
-    fn decode_key(data: &EncodedKey<Self>) -> std::result::Result<Self::KeyType, Box<dyn std::error::Error>> {
+    fn decode_key(
+        data: &EncodedKey<Self>,
+    ) -> std::result::Result<Self::KeyType, Box<dyn std::error::Error>> {
         bincode::deserialize(&data.inner).map_err(|e| e.into())
     }
 
@@ -110,6 +114,11 @@ trait KVOrm<'a>: KeyOrm<'a> {
     ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         Self::get_with_option(db, ReadOptions::new(), key)
     }
+    fn delete(
+        db: &Database<EncodedKey<Self>>,
+        sync: bool,
+        key: &EncodedKey<Self>,
+    ) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 impl<'a> KVOrm<'a> for Command {
@@ -143,6 +152,14 @@ impl<'a> KVOrm<'a> for Command {
             Ok(None)
         }
     }
+
+    fn delete(
+        db: &Database<EncodedKey<Self>>,
+        sync: bool,
+        key: &EncodedKey<Self>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        db.delete(WriteOptions { sync }, key).map_err(|e| e.into())
+    }
 }
 
 fn main() {
@@ -151,6 +168,7 @@ fn main() {
         args: vec!["arg1".into(), "arg2".into(), "arg3".into()],
         current_dir: Some("\\dir".into()),
     };
+    let key = cmd.key().unwrap();
 
     let tempdir = TempDir::new("demo").unwrap();
     let path = tempdir.path();
@@ -172,14 +190,25 @@ fn main() {
         }
     };
 
-    let res = Command::get(&database, &cmd.key().unwrap());
-    dbg!(&res);
+    let res = Command::get(&database, &key).unwrap();
+    // dbg!(&res);
+    assert_eq!(res, Some(cmd.clone()));
 
     let read_opts = ReadOptions::new();
     let mut iter = database.iter(read_opts);
-    let entry = iter.next().map(|(k,v)| {
-        (Command::decode_key(&k).unwrap(), Command::decode(&v).unwrap())
-    }).unwrap();
+    let entry = iter
+        .next()
+        .map(|(k, v)| {
+            (
+                Command::decode_key(&k).unwrap(),
+                Command::decode(&v).unwrap(),
+            )
+        })
+        .unwrap();
     dbg!(&entry);
-    assert_eq!(entry, ((cmd.executable,cmd.args.clone()), cmd));
+    assert_eq!(entry, ((cmd.executable, cmd.args.clone()), cmd));
+
+    Command::delete(&database, false, &key).unwrap();
+
+    assert!(Command::get(&database, &key).unwrap().is_none());
 }
